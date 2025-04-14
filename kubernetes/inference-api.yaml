@@ -1,0 +1,320 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: novalux-inference-api
+  namespace: novalux-ai
+  labels:
+    app: novalux-inference-api
+    component: ai-processing
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: novalux-inference-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: novalux-inference-api
+        component: ai-processing
+    spec:
+      serviceAccountName: novalux-ai-model-server
+      containers:
+      - name: inference-api
+        image: novalux/inference-api:v1.0.0
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 8081
+          name: grpc
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: MODEL_SERVER_URL
+          value: "novalux-model-server.novalux-ai.svc.cluster.local:8000"
+        - name: MODEL_SERVER_GRPC_URL
+          value: "novalux-model-server.novalux-ai.svc.cluster.local:8001"
+        - name: MODEL_REGISTRY_URL
+          value: "novalux-model-registry.novalux-ai.svc.cluster.local:8080"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-headless.novalux-data.svc.cluster.local:9092"
+        - name: ELASTICSEARCH_HOSTS
+          value: "elasticsearch-master.novalux-data.svc.cluster.local:9200"
+        - name: MAX_REQUEST_SIZE
+          value: "10MB"
+        - name: REQUEST_TIMEOUT
+          value: "5s"
+        - name: ENABLE_AUTHENTICATION
+          value: "true"
+        - name: ENABLE_RATE_LIMITING
+          value: "true"
+        - name: RATE_LIMIT_REQUESTS_PER_MINUTE
+          value: "1000"
+        - name: ENABLE_REQUEST_VALIDATION
+          value: "true"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/novalux
+      volumes:
+      - name: config-volume
+        configMap:
+          name: novalux-inference-api-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novalux-inference-api
+  namespace: novalux-ai
+  labels:
+    app: novalux-inference-api
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: http
+    name: http
+  - port: 8081
+    targetPort: grpc
+    name: grpc
+  - port: 9090
+    targetPort: metrics
+    name: metrics
+  selector:
+    app: novalux-inference-api
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: novalux-inference-api-config
+  namespace: novalux-ai
+data:
+  api-config.yaml: |
+    server:
+      http-port: 8080
+      grpc-port: 8081
+      metrics-port: 9090
+      shutdown-timeout: 30s
+      max-request-size: 10MB
+      request-timeout: 5s
+    
+    authentication:
+      enabled: true
+      token-header: "X-API-Key"
+      token-validation-endpoint: "http://novalux-adaptive-core.novalux-system.svc.cluster.local:8080/auth/validate"
+      cache-ttl: 300s
+    
+    rate-limiting:
+      enabled: true
+      requests-per-minute: 1000
+      burst: 100
+      by-client-id: true
+    
+    model-server:
+      http-url: "http://novalux-model-server.novalux-ai.svc.cluster.local:8000"
+      grpc-url: "novalux-model-server.novalux-ai.svc.cluster.local:8001"
+      timeout: 5s
+      retry-attempts: 3
+      retry-delay: 100ms
+    
+    model-registry:
+      url: "http://novalux-model-registry.novalux-ai.svc.cluster.local:8080"
+      cache-ttl: 60s
+    
+    kafka:
+      bootstrap-servers: "kafka-headless.novalux-data.svc.cluster.local:9092"
+      producer:
+        topic: "model-inference-events"
+        batch-size: 100
+        linger-ms: 10
+        compression-type: "lz4"
+      consumer:
+        group-id: "inference-api"
+        topics:
+          - "model-inference-requests"
+        auto-offset-reset: "latest"
+    
+    elasticsearch:
+      hosts: "elasticsearch-master.novalux-data.svc.cluster.local:9200"
+      index-prefix: "inference-api-"
+      bulk-actions: 1000
+      bulk-size: 5MB
+      flush-interval: 5s
+    
+    telemetry:
+      enabled: true
+      sampling-rate: 0.1
+      trace-export-interval: 5s
+    
+    endpoints:
+      - path: "/v1/models"
+        method: "GET"
+        description: "List available models"
+        rate-limit-multiplier: 0.1
+        authentication-required: false
+      
+      - path: "/v1/models/{model_name}/versions"
+        method: "GET"
+        description: "List available versions for a model"
+        rate-limit-multiplier: 0.1
+        authentication-required: false
+      
+      - path: "/v1/models/{model_name}/predict"
+        method: "POST"
+        description: "Make a prediction using the latest model version"
+        rate-limit-multiplier: 1.0
+        authentication-required: true
+        validation-schema: "predict-schema.json"
+      
+      - path: "/v1/models/{model_name}/versions/{version}/predict"
+        method: "POST"
+        description: "Make a prediction using a specific model version"
+        rate-limit-multiplier: 1.0
+        authentication-required: true
+        validation-schema: "predict-schema.json"
+      
+      - path: "/v1/models/{model_name}/batch-predict"
+        method: "POST"
+        description: "Make batch predictions using the latest model version"
+        rate-limit-multiplier: 5.0
+        authentication-required: true
+        validation-schema: "batch-predict-schema.json"
+      
+      - path: "/v1/models/{model_name}/versions/{version}/batch-predict"
+        method: "POST"
+        description: "Make batch predictions using a specific model version"
+        rate-limit-multiplier: 5.0
+        authentication-required: true
+        validation-schema: "batch-predict-schema.json"
+    
+    monitoring:
+      metrics-interval: 15s
+      health-check-interval: 5s
+      alert-thresholds:
+        request-latency-p99-ms: 500
+        error-rate: 0.01
+        request-rate-min: 10
+  
+  predict-schema.json: |
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "required": ["instances"],
+      "properties": {
+        "instances": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "type": "object"
+          }
+        },
+        "parameters": {
+          "type": "object"
+        }
+      }
+    }
+  
+  batch-predict-schema.json: |
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "required": ["instances"],
+      "properties": {
+        "instances": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "type": "object"
+          }
+        },
+        "parameters": {
+          "type": "object"
+        }
+      }
+    }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-inference-api-access
+  namespace: novalux-ai
+spec:
+  podSelector:
+    matchLabels:
+      app: novalux-inference-api
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: novalux-system
+    - namespaceSelector:
+        matchLabels:
+          name: novalux-data
+    - namespaceSelector:
+        matchLabels:
+          name: novalux-games
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: novalux-inference-api-hpa
+  namespace: novalux-ai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: novalux-inference-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60

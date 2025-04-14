@@ -1,0 +1,474 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: novalux-training-orchestrator
+  namespace: novalux-ai
+  labels:
+    app: novalux-training-orchestrator
+    component: ai-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: novalux-training-orchestrator
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: novalux-training-orchestrator
+        component: ai-processing
+    spec:
+      serviceAccountName: novalux-ai-model-server
+      containers:
+      - name: training-orchestrator
+        image: novalux/training-orchestrator:v1.0.0
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-headless.novalux-data.svc.cluster.local:9092"
+        - name: ELASTICSEARCH_HOSTS
+          value: "elasticsearch-master.novalux-data.svc.cluster.local:9200"
+        - name: MODEL_REGISTRY_URL
+          value: "http://novalux-model-registry.novalux-ai.svc.cluster.local:8080"
+        - name: FEATURE_STORE_URL
+          value: "http://novalux-feature-store.novalux-ai.svc.cluster.local:8080"
+        - name: EXPERIMENT_TRACKER_URL
+          value: "http://novalux-experiment-tracker.novalux-ai.svc.cluster.local:8080"
+        - name: TRAINING_NAMESPACE
+          value: "novalux-ai"
+        - name: MAX_CONCURRENT_JOBS
+          value: "5"
+        - name: DEFAULT_TRAINING_TIMEOUT
+          value: "3600"  # 1 hour in seconds
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/novalux
+      volumes:
+      - name: config-volume
+        configMap:
+          name: novalux-training-orchestrator-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novalux-training-orchestrator
+  namespace: novalux-ai
+  labels:
+    app: novalux-training-orchestrator
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: http
+    name: http
+  - port: 9090
+    targetPort: metrics
+    name: metrics
+  selector:
+    app: novalux-training-orchestrator
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: novalux-training-orchestrator-config
+  namespace: novalux-ai
+data:
+  training-orchestrator.yaml: |
+    server:
+      port: 8080
+      metrics-port: 9090
+      shutdown-timeout: 30s
+    
+    training:
+      max-concurrent-jobs: 5
+      default-timeout: 3600
+      namespace: "novalux-ai"
+      service-account: "novalux-ai-model-server"
+      
+      models:
+        - name: "player-behavior-analyzer"
+          schedule: "0 2 * * *"  # Daily at 2 AM
+          image: "novalux/player-behavior-trainer:v1.0.0"
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+              nvidia.com/gpu: "1"
+          data-sources:
+            - name: "player-actions"
+              type: "kafka"
+              config:
+                topic: "player-actions"
+                time-window: "7d"
+            - name: "game-events"
+              type: "kafka"
+              config:
+                topic: "game-events"
+                time-window: "7d"
+          evaluation-metrics:
+            - name: "accuracy"
+              threshold: 0.85
+            - name: "f1-score"
+              threshold: 0.80
+            - name: "precision"
+              threshold: 0.75
+            - name: "recall"
+              threshold: 0.75
+        
+        - name: "game-balance-optimizer"
+          schedule: "0 3 * * *"  # Daily at 3 AM
+          image: "novalux/game-balance-trainer:v1.0.0"
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+          data-sources:
+            - name: "game-metrics"
+              type: "elasticsearch"
+              config:
+                index: "game-metrics"
+                time-window: "14d"
+          evaluation-metrics:
+            - name: "mean-squared-error"
+              threshold: 0.1
+            - name: "r-squared"
+              threshold: 0.7
+        
+        - name: "content-recommendation-engine"
+          schedule: "0 4 * * *"  # Daily at 4 AM
+          image: "novalux/recommendation-trainer:v1.0.0"
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+              nvidia.com/gpu: "1"
+          data-sources:
+            - name: "player-content-interactions"
+              type: "elasticsearch"
+              config:
+                index: "player-content-interactions"
+                time-window: "30d"
+          evaluation-metrics:
+            - name: "ndcg@10"
+              threshold: 0.65
+            - name: "precision@5"
+              threshold: 0.7
+            - name: "recall@10"
+              threshold: 0.6
+        
+        - name: "responsible-gaming-monitor"
+          schedule: "0 1 * * *"  # Daily at 1 AM
+          image: "novalux/responsible-gaming-trainer:v1.0.0"
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+          data-sources:
+            - name: "player-sessions"
+              type: "elasticsearch"
+              config:
+                index: "player-sessions"
+                time-window: "14d"
+            - name: "player-transactions"
+              type: "elasticsearch"
+              config:
+                index: "player-transactions"
+                time-window: "14d"
+          evaluation-metrics:
+            - name: "auc-roc"
+              threshold: 0.85
+            - name: "precision"
+              threshold: 0.8
+            - name: "recall"
+              threshold: 0.75
+    
+    kafka:
+      bootstrap-servers: "kafka-headless.novalux-data.svc.cluster.local:9092"
+      consumer-group: "training-orchestrator"
+      topics:
+        input:
+          - "model-training-requests"
+        output:
+          training-status: "model-training-status"
+          training-results: "model-training-results"
+    
+    elasticsearch:
+      hosts: "elasticsearch-master.novalux-data.svc.cluster.local:9200"
+      indices:
+        training-history:
+          name: "model-training-history"
+          retention-days: 90
+    
+    model-registry:
+      url: "http://novalux-model-registry.novalux-ai.svc.cluster.local:8080"
+      timeout: 5s
+    
+    feature-store:
+      url: "http://novalux-feature-store.novalux-ai.svc.cluster.local:8080"
+      timeout: 5s
+    
+    experiment-tracker:
+      url: "http://novalux-experiment-tracker.novalux-ai.svc.cluster.local:8080"
+      timeout: 5s
+    
+    monitoring:
+      metrics-interval: 15s
+      health-check-interval: 5s
+      alert-thresholds:
+        training-failure-rate: 0.2
+        training-duration-max: 7200  # 2 hours in seconds
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: novalux-feature-store
+  namespace: novalux-ai
+  labels:
+    app: novalux-feature-store
+    component: ai-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: novalux-feature-store
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: novalux-feature-store
+        component: ai-processing
+    spec:
+      serviceAccountName: novalux-ai-model-server
+      containers:
+      - name: feature-store
+        image: novalux/feature-store:v1.0.0
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-headless.novalux-data.svc.cluster.local:9092"
+        - name: REDIS_HOST
+          value: "feature-store-redis.novalux-ai.svc.cluster.local"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: DATABASE_URL
+          value: "postgresql://featurestore:password@feature-store-db:5432/featurestore"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/novalux
+      volumes:
+      - name: config-volume
+        configMap:
+          name: novalux-feature-store-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novalux-feature-store
+  namespace: novalux-ai
+  labels:
+    app: novalux-feature-store
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: http
+    name: http
+  - port: 9090
+    targetPort: metrics
+    name: metrics
+  selector:
+    app: novalux-feature-store
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: novalux-experiment-tracker
+  namespace: novalux-ai
+  labels:
+    app: novalux-experiment-tracker
+    component: ai-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: novalux-experiment-tracker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: novalux-experiment-tracker
+        component: ai-processing
+    spec:
+      serviceAccountName: novalux-ai-model-server
+      containers:
+      - name: experiment-tracker
+        image: novalux/experiment-tracker:v1.0.0
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://mlflow:password@experiment-tracker-db:5432/mlflow"
+        - name: ARTIFACT_ROOT
+          value: "/mnt/artifacts"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        volumeMounts:
+        - name: artifact-volume
+          mountPath: /mnt/artifacts
+      volumes:
+      - name: artifact-volume
+        persistentVolumeClaim:
+          claimName: novalux-experiment-artifacts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novalux-experiment-tracker
+  namespace: novalux-ai
+  labels:
+    app: novalux-experiment-tracker
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: http
+    name: http
+  - port: 9090
+    targetPort: metrics
+    name: metrics
+  selector:
+    app: novalux-experiment-tracker
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: novalux-experiment-artifacts
+  namespace: novalux-ai
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: standard
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: novalux-training-scheduler
+  namespace: novalux-ai
+spec:
+  schedule: "0 * * * *"  # Run every hour
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: novalux-ai-model-server
+          containers:
+          - name: scheduler
+            image: novalux/training-scheduler:v1.0.0
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: ORCHESTRATOR_URL
+              value: "http://novalux-training-orchestrator:8080"
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka-headless.novalux-data.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC
+              value: "model-training-requests"
+          restartPolicy: OnFailure

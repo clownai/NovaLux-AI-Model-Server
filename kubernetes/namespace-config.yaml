@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: novalux-ai
+  labels:
+    name: novalux-ai
+    environment: development
+    component: ai-processing
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: novalux-ai-resource-quota
+  namespace: novalux-ai
+spec:
+  hard:
+    pods: "50"
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    limits.cpu: "40"
+    limits.memory: 80Gi
+    requests.nvidia.com/gpu: "4"
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: novalux-ai
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-internal-traffic
+  namespace: novalux-ai
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: novalux-ai
+    - namespaceSelector:
+        matchLabels:
+          name: novalux-system
+    - namespaceSelector:
+        matchLabels:
+          name: novalux-data
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: novalux-ai-model-server-config
+  namespace: novalux-ai
+data:
+  model-server.yaml: |
+    server:
+      port: 8000
+      metrics-port: 9090
+      grpc-port: 8001
+      max-concurrent-requests: 100
+      request-timeout: 5s
+      max-request-size: 10MB
+    
+    models:
+      base-path: "/models"
+      load-at-startup:
+        - name: "player-behavior-analyzer"
+          version: "v1"
+          type: "tensorflow"
+          max-batch-size: 32
+        - name: "game-balance-optimizer"
+          version: "v1"
+          type: "onnx"
+          max-batch-size: 16
+        - name: "content-recommendation-engine"
+          version: "v1"
+          type: "tensorflow"
+          max-batch-size: 64
+        - name: "responsible-gaming-monitor"
+          version: "v1"
+          type: "pytorch"
+          max-batch-size: 32
+      
+      versioning:
+        strategy: "latest-and-specific"
+        max-versions-per-model: 5
+        default-version-strategy: "latest"
+      
+      cache:
+        enabled: true
+        max-size: 4096MB
+        ttl: 3600s
+    
+    kafka:
+      bootstrap-servers: "kafka-headless.novalux-data.svc.cluster.local:9092"
+      consumer-group: "ai-model-server"
+      topics:
+        input:
+          - "model-inference-requests"
+          - "model-update-requests"
+        output:
+          inference-results: "model-inference-results"
+          model-updates: "model-update-status"
+    
+    elasticsearch:
+      hosts: "elasticsearch-master.novalux-data.svc.cluster.local:9200"
+      indices:
+        inference-logs:
+          name: "model-inference-logs"
+          retention-days: 30
+        model-metrics:
+          name: "model-performance-metrics"
+          retention-days: 90
+    
+    monitoring:
+      metrics-interval: 15s
+      health-check-interval: 5s
+      alert-thresholds:
+        inference-latency-p99-ms: 100
+        error-rate: 0.01
+        model-load-time-max-s: 30
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: novalux-ai-model-server
+  namespace: novalux-ai
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: novalux-ai-model-server
+  namespace: novalux-ai
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: novalux-ai-model-server
+  namespace: novalux-ai
+subjects:
+- kind: ServiceAccount
+  name: novalux-ai-model-server
+  namespace: novalux-ai
+roleRef:
+  kind: Role
+  name: novalux-ai-model-server
+  apiGroup: rbac.authorization.k8s.io

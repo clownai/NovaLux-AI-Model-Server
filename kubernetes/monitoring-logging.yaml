@@ -1,0 +1,945 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: novalux-monitoring
+  namespace: novalux-ai
+  labels:
+    app: novalux-monitoring
+    component: ai-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: novalux-monitoring
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: novalux-monitoring
+        component: ai-processing
+    spec:
+      serviceAccountName: novalux-ai-model-server
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.40.0
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "0.5"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+        ports:
+        - containerPort: 9090
+          name: prometheus
+        volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus
+        - name: prometheus-data
+          mountPath: /prometheus
+      - name: grafana
+        image: grafana/grafana:9.3.0
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "0.5"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+        ports:
+        - containerPort: 3000
+          name: grafana
+        env:
+        - name: GF_SECURITY_ADMIN_USER
+          value: "admin"
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "novalux-admin"  # In production, use Kubernetes secrets
+        - name: GF_INSTALL_PLUGINS
+          value: "grafana-piechart-panel,grafana-worldmap-panel"
+        volumeMounts:
+        - name: grafana-data
+          mountPath: /var/lib/grafana
+        - name: grafana-provisioning
+          mountPath: /etc/grafana/provisioning
+      - name: alertmanager
+        image: prom/alertmanager:v0.24.0
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "0.2"
+            memory: "512Mi"
+          limits:
+            cpu: "0.5"
+            memory: "1Gi"
+        ports:
+        - containerPort: 9093
+          name: alertmanager
+        volumeMounts:
+        - name: alertmanager-config
+          mountPath: /etc/alertmanager
+        - name: alertmanager-data
+          mountPath: /alertmanager
+      volumes:
+      - name: prometheus-config
+        configMap:
+          name: novalux-prometheus-config
+      - name: prometheus-data
+        persistentVolumeClaim:
+          claimName: novalux-prometheus-data
+      - name: grafana-data
+        persistentVolumeClaim:
+          claimName: novalux-grafana-data
+      - name: grafana-provisioning
+        configMap:
+          name: novalux-grafana-provisioning
+      - name: alertmanager-config
+        configMap:
+          name: novalux-alertmanager-config
+      - name: alertmanager-data
+        persistentVolumeClaim:
+          claimName: novalux-alertmanager-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novalux-prometheus
+  namespace: novalux-ai
+  labels:
+    app: novalux-monitoring
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9090
+    targetPort: prometheus
+    name: prometheus
+  selector:
+    app: novalux-monitoring
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novalux-grafana
+  namespace: novalux-ai
+  labels:
+    app: novalux-monitoring
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3000
+    targetPort: grafana
+    name: grafana
+  selector:
+    app: novalux-monitoring
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novalux-alertmanager
+  namespace: novalux-ai
+  labels:
+    app: novalux-monitoring
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9093
+    targetPort: alertmanager
+    name: alertmanager
+  selector:
+    app: novalux-monitoring
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: novalux-prometheus-data
+  namespace: novalux-ai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: standard
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: novalux-grafana-data
+  namespace: novalux-ai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: novalux-alertmanager-data
+  namespace: novalux-ai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: novalux-prometheus-config
+  namespace: novalux-ai
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      scrape_timeout: 10s
+    
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+    
+    alerting:
+      alertmanagers:
+      - static_configs:
+        - targets:
+          - localhost:9093
+    
+    scrape_configs:
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+        - role: endpoints
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: default;kubernetes;https
+      
+      - job_name: 'kubernetes-nodes'
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+        - role: node
+        relabel_configs:
+        - action: labelmap
+          regex: __meta_kubernetes_node_label_(.+)
+        - target_label: __address__
+          replacement: kubernetes.default.svc:443
+        - source_labels: [__meta_kubernetes_node_name]
+          regex: (.+)
+          target_label: __metrics_path__
+          replacement: /api/v1/nodes/${1}/proxy/metrics
+      
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+        - role: pod
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+        - action: labelmap
+          regex: __meta_kubernetes_pod_label_(.+)
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: kubernetes_pod_name
+      
+      - job_name: 'novalux-model-server'
+        kubernetes_sd_configs:
+        - role: endpoints
+          namespaces:
+            names:
+            - novalux-ai
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_service_label_app]
+          action: keep
+          regex: novalux-model-server
+        - source_labels: [__meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: metrics
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_service_name]
+          action: replace
+          target_label: kubernetes_service_name
+      
+      - job_name: 'novalux-inference-api'
+        kubernetes_sd_configs:
+        - role: endpoints
+          namespaces:
+            names:
+            - novalux-ai
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_service_label_app]
+          action: keep
+          regex: novalux-inference-api
+        - source_labels: [__meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: metrics
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_service_name]
+          action: replace
+          target_label: kubernetes_service_name
+      
+      - job_name: 'novalux-model-registry'
+        kubernetes_sd_configs:
+        - role: endpoints
+          namespaces:
+            names:
+            - novalux-ai
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_service_label_app]
+          action: keep
+          regex: novalux-model-registry
+        - source_labels: [__meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: metrics
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_service_name]
+          action: replace
+          target_label: kubernetes_service_name
+      
+      - job_name: 'novalux-training-orchestrator'
+        kubernetes_sd_configs:
+        - role: endpoints
+          namespaces:
+            names:
+            - novalux-ai
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_service_label_app]
+          action: keep
+          regex: novalux-training-orchestrator
+        - source_labels: [__meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: metrics
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_service_name]
+          action: replace
+          target_label: kubernetes_service_name
+  
+  rules/model-server-alerts.yml: |
+    groups:
+    - name: model-server-alerts
+      rules:
+      - alert: ModelServerHighErrorRate
+        expr: sum(rate(model_server_errors_total[5m])) / sum(rate(model_server_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model Server High Error Rate"
+          description: "Model Server error rate is above 5% for 5 minutes (current value: {{ $value }})"
+      
+      - alert: ModelServerHighLatency
+        expr: histogram_quantile(0.99, sum(rate(model_server_request_duration_seconds_bucket[5m])) by (le)) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model Server High Latency"
+          description: "Model Server 99th percentile latency is above 500ms for 5 minutes (current value: {{ $value }}s)"
+      
+      - alert: ModelServerHighMemoryUsage
+        expr: container_memory_usage_bytes{container="model-server"} / container_spec_memory_limit_bytes{container="model-server"} > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model Server High Memory Usage"
+          description: "Model Server memory usage is above 90% for 5 minutes (current value: {{ $value }})"
+      
+      - alert: ModelServerHighCPUUsage
+        expr: sum(rate(container_cpu_usage_seconds_total{container="model-server"}[5m])) / sum(container_spec_cpu_quota{container="model-server"} / 100000) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model Server High CPU Usage"
+          description: "Model Server CPU usage is above 90% for 5 minutes (current value: {{ $value }})"
+      
+      - alert: ModelLoadFailure
+        expr: model_load_failures_total > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model Load Failure"
+          description: "Model Server failed to load models (failures: {{ $value }})"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: novalux-alertmanager-config
+  namespace: novalux-ai
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+      slack_api_url: 'https://hooks.slack.com/services/TXXXXXXXX/BXXXXXXXX/XXXXXXXXXXXXXXXXXXXXXXXX'
+    
+    route:
+      group_by: ['alertname', 'job', 'severity']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      receiver: 'slack-notifications'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'slack-critical'
+        continue: true
+    
+    receivers:
+    - name: 'slack-notifications'
+      slack_configs:
+      - channel: '#novalux-alerts'
+        send_resolved: true
+        title: '{{ template "slack.default.title" . }}'
+        text: '{{ template "slack.default.text" . }}'
+    
+    - name: 'slack-critical'
+      slack_configs:
+      - channel: '#novalux-critical'
+        send_resolved: true
+        title: '{{ template "slack.default.title" . }}'
+        text: '{{ template "slack.default.text" . }}'
+    
+    templates:
+    - '/etc/alertmanager/template/*.tmpl'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: novalux-grafana-provisioning
+  namespace: novalux-ai
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+    - name: Prometheus
+      type: prometheus
+      url: http://localhost:9090
+      access: proxy
+      isDefault: true
+    
+    - name: Elasticsearch
+      type: elasticsearch
+      url: http://elasticsearch-master.novalux-data.svc.cluster.local:9200
+      access: proxy
+      database: "[model-*]"
+      jsonData:
+        timeField: "@timestamp"
+        esVersion: 7.10.0
+  
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+    - name: 'default'
+      orgId: 1
+      folder: ''
+      type: file
+      disableDeletion: false
+      editable: true
+      options:
+        path: /etc/grafana/provisioning/dashboards
+  
+  dashboards/model-server-dashboard.json: |
+    {
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": "-- Grafana --",
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "editable": true,
+      "gnetId": null,
+      "graphTooltip": 0,
+      "id": 1,
+      "links": [],
+      "panels": [
+        {
+          "aliasColors": {},
+          "bars": false,
+          "dashLength": 10,
+          "dashes": false,
+          "datasource": "Prometheus",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {}
+            },
+            "overrides": []
+          },
+          "fill": 1,
+          "fillGradient": 0,
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 0
+          },
+          "hiddenSeries": false,
+          "id": 2,
+          "legend": {
+            "avg": false,
+            "current": false,
+            "max": false,
+            "min": false,
+            "show": true,
+            "total": false,
+            "values": false
+          },
+          "lines": true,
+          "linewidth": 1,
+          "nullPointMode": "null",
+          "options": {
+            "alertThreshold": true
+          },
+          "percentage": false,
+          "pluginVersion": "7.2.0",
+          "pointradius": 2,
+          "points": false,
+          "renderer": "flot",
+          "seriesOverrides": [],
+          "spaceLength": 10,
+          "stack": false,
+          "steppedLine": false,
+          "targets": [
+            {
+              "expr": "sum(rate(model_server_requests_total[5m])) by (model)",
+              "interval": "",
+              "legendFormat": "{{model}}",
+              "refId": "A"
+            }
+          ],
+          "thresholds": [],
+          "timeFrom": null,
+          "timeRegions": [],
+          "timeShift": null,
+          "title": "Request Rate by Model",
+          "tooltip": {
+            "shared": true,
+            "sort": 0,
+            "value_type": "individual"
+          },
+          "type": "graph",
+          "xaxis": {
+            "buckets": null,
+            "mode": "time",
+            "name": null,
+            "show": true,
+            "values": []
+          },
+          "yaxes": [
+            {
+              "format": "short",
+              "label": "Requests/sec",
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            },
+            {
+              "format": "short",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            }
+          ],
+          "yaxis": {
+            "align": false,
+            "alignLevel": null
+          }
+        },
+        {
+          "aliasColors": {},
+          "bars": false,
+          "dashLength": 10,
+          "dashes": false,
+          "datasource": "Prometheus",
+          "fieldConfig": {
+            "defaults": {
+              "custom": {}
+            },
+            "overrides": []
+          },
+          "fill": 1,
+          "fillGradient": 0,
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 0
+          },
+          "hiddenSeries": false,
+          "id": 3,
+          "legend": {
+            "avg": false,
+            "current": false,
+            "max": false,
+            "min": false,
+            "show": true,
+            "total": false,
+            "values": false
+          },
+          "lines": true,
+          "linewidth": 1,
+          "nullPointMode": "null",
+          "options": {
+            "alertThreshold": true
+          },
+          "percentage": false,
+          "pluginVersion": "7.2.0",
+          "pointradius": 2,
+          "points": false,
+          "renderer": "flot",
+          "seriesOverrides": [],
+          "spaceLength": 10,
+          "stack": false,
+          "steppedLine": false,
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(model_server_request_duration_seconds_bucket[5m])) by (le, model))",
+              "interval": "",
+              "legendFormat": "{{model}} p99",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(model_server_request_duration_seconds_bucket[5m])) by (le, model))",
+              "interval": "",
+              "legendFormat": "{{model}} p95",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(model_server_request_duration_seconds_bucket[5m])) by (le, model))",
+              "interval": "",
+              "legendFormat": "{{model}} p50",
+              "refId": "C"
+            }
+          ],
+          "thresholds": [],
+          "timeFrom": null,
+          "timeRegions": [],
+          "timeShift": null,
+          "title": "Latency by Model",
+          "tooltip": {
+            "shared": true,
+            "sort": 0,
+            "value_type": "individual"
+          },
+          "type": "graph",
+          "xaxis": {
+            "buckets": null,
+            "mode": "time",
+            "name": null,
+            "show": true,
+            "values": []
+          },
+          "yaxes": [
+            {
+              "format": "s",
+              "label": "Latency",
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            },
+            {
+              "format": "short",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            }
+          ],
+          "yaxis": {
+            "align": false,
+            "alignLevel": null
+          }
+        }
+      ],
+      "refresh": "10s",
+      "schemaVersion": 26,
+      "style": "dark",
+      "tags": [],
+      "templating": {
+        "list": []
+      },
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "timepicker": {},
+      "timezone": "",
+      "title": "Model Server Dashboard",
+      "uid": "model-server",
+      "version": 1
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: novalux-logging
+  namespace: novalux-ai
+  labels:
+    app: novalux-logging
+    component: ai-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: novalux-logging
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: novalux-logging
+        component: ai-processing
+    spec:
+      serviceAccountName: novalux-ai-model-server
+      containers:
+      - name: fluentd
+        image: fluent/fluentd-kubernetes-daemonset:v1.14-debian-elasticsearch7-1
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "0.5"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+        env:
+        - name: FLUENT_ELASTICSEARCH_HOST
+          value: "elasticsearch-master.novalux-data.svc.cluster.local"
+        - name: FLUENT_ELASTICSEARCH_PORT
+          value: "9200"
+        - name: FLUENT_ELASTICSEARCH_SCHEME
+          value: "http"
+        - name: FLUENT_ELASTICSEARCH_USER
+          value: "elastic"
+        - name: FLUENT_ELASTICSEARCH_PASSWORD
+          value: "changeme"  # In production, use Kubernetes secrets
+        - name: FLUENT_ELASTICSEARCH_INDEX_NAME
+          value: "novalux-ai-logs"
+        volumeMounts:
+        - name: fluentd-config
+          mountPath: /fluentd/etc/fluent.conf
+          subPath: fluent.conf
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+      volumes:
+      - name: fluentd-config
+        configMap:
+          name: novalux-fluentd-config
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novalux-logging
+  namespace: novalux-ai
+  labels:
+    app: novalux-logging
+spec:
+  type: ClusterIP
+  ports:
+  - port: 24224
+    targetPort: 24224
+    name: forward
+  selector:
+    app: novalux-logging
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: novalux-fluentd-config
+  namespace: novalux-ai
+data:
+  fluent.conf: |
+    <source>
+      @type tail
+      path /var/log/containers/novalux-*.log
+      pos_file /var/log/novalux-containers.log.pos
+      tag kubernetes.*
+      read_from_head true
+      <parse>
+        @type json
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
+    </source>
+    
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+      kubernetes_url https://kubernetes.default.svc
+      bearer_token_file /var/run/secrets/kubernetes.io/serviceaccount/token
+      ca_file /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      skip_labels false
+      skip_container_metadata false
+      skip_namespace_metadata false
+      skip_master_url false
+    </filter>
+    
+    <filter kubernetes.**>
+      @type record_transformer
+      <record>
+        hostname ${hostname}
+        tag ${tag}
+      </record>
+    </filter>
+    
+    <match kubernetes.var.log.containers.novalux-model-server**>
+      @type elasticsearch
+      host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+      port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+      scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'http'}"
+      user "#{ENV['FLUENT_ELASTICSEARCH_USER']}"
+      password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD']}"
+      index_name novalux-model-server-logs
+      type_name fluentd
+      logstash_format true
+      logstash_prefix novalux-model-server
+      <buffer>
+        flush_thread_count 8
+        flush_interval 5s
+        chunk_limit_size 2M
+        queue_limit_length 32
+        retry_max_interval 30
+        retry_forever true
+      </buffer>
+    </match>
+    
+    <match kubernetes.var.log.containers.novalux-inference-api**>
+      @type elasticsearch
+      host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+      port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+      scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'http'}"
+      user "#{ENV['FLUENT_ELASTICSEARCH_USER']}"
+      password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD']}"
+      index_name novalux-inference-api-logs
+      type_name fluentd
+      logstash_format true
+      logstash_prefix novalux-inference-api
+      <buffer>
+        flush_thread_count 8
+        flush_interval 5s
+        chunk_limit_size 2M
+        queue_limit_length 32
+        retry_max_interval 30
+        retry_forever true
+      </buffer>
+    </match>
+    
+    <match kubernetes.var.log.containers.novalux-model-registry**>
+      @type elasticsearch
+      host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+      port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+      scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'http'}"
+      user "#{ENV['FLUENT_ELASTICSEARCH_USER']}"
+      password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD']}"
+      index_name novalux-model-registry-logs
+      type_name fluentd
+      logstash_format true
+      logstash_prefix novalux-model-registry
+      <buffer>
+        flush_thread_count 8
+        flush_interval 5s
+        chunk_limit_size 2M
+        queue_limit_length 32
+        retry_max_interval 30
+        retry_forever true
+      </buffer>
+    </match>
+    
+    <match kubernetes.var.log.containers.novalux-training-orchestrator**>
+      @type elasticsearch
+      host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+      port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+      scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'http'}"
+      user "#{ENV['FLUENT_ELASTICSEARCH_USER']}"
+      password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD']}"
+      index_name novalux-training-orchestrator-logs
+      type_name fluentd
+      logstash_format true
+      logstash_prefix novalux-training-orchestrator
+      <buffer>
+        flush_thread_count 8
+        flush_interval 5s
+        chunk_limit_size 2M
+        queue_limit_length 32
+        retry_max_interval 30
+        retry_forever true
+      </buffer>
+    </match>
+    
+    <match kubernetes.**>
+      @type elasticsearch
+      host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+      port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+      scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'http'}"
+      user "#{ENV['FLUENT_ELASTICSEARCH_USER']}"
+      password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD']}"
+      index_name novalux-ai-logs
+      type_name fluentd
+      logstash_format true
+      logstash_prefix novalux-ai
+      <buffer>
+        flush_thread_count 8
+        flush_interval 5s
+        chunk_limit_size 2M
+        queue_limit_length 32
+        retry_max_interval 30
+        retry_forever true
+      </buffer>
+    </match>

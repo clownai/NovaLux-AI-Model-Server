@@ -1,0 +1,224 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: novalux-model-registry
+  namespace: novalux-ai
+  labels:
+    app: novalux-model-registry
+    component: ai-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: novalux-model-registry
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: novalux-model-registry
+        component: ai-processing
+    spec:
+      serviceAccountName: novalux-ai-model-server
+      containers:
+      - name: model-registry
+        image: novalux/model-registry:v1.0.0
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: STORAGE_PATH
+          value: "/registry-data"
+        - name: DATABASE_URL
+          value: "postgresql://registry:password@model-registry-db:5432/registry"
+        - name: MAX_UPLOAD_SIZE
+          value: "1024MB"
+        - name: MAX_VERSIONS_PER_MODEL
+          value: "10"
+        - name: ENABLE_VERSION_ALIASES
+          value: "true"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-headless.novalux-data.svc.cluster.local:9092"
+        - name: NOTIFICATION_TOPIC
+          value: "model-registry-events"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        volumeMounts:
+        - name: registry-data
+          mountPath: /registry-data
+      volumes:
+      - name: registry-data
+        persistentVolumeClaim:
+          claimName: novalux-model-registry-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novalux-model-registry
+  namespace: novalux-ai
+  labels:
+    app: novalux-model-registry
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: http
+    name: http
+  - port: 9090
+    targetPort: metrics
+    name: metrics
+  selector:
+    app: novalux-model-registry
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: model-registry-db
+  namespace: novalux-ai
+  labels:
+    app: model-registry-db
+    component: ai-processing
+spec:
+  serviceName: "model-registry-db"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-registry-db
+  template:
+    metadata:
+      labels:
+        app: model-registry-db
+        component: ai-processing
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:14
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "0.5"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_USER
+          value: "registry"
+        - name: POSTGRES_PASSWORD
+          value: "password"  # In production, use Kubernetes secrets
+        - name: POSTGRES_DB
+          value: "registry"
+        - name: PGDATA
+          value: "/var/lib/postgresql/data/pgdata"
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+      storageClassName: standard
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-registry-db
+  namespace: novalux-ai
+  labels:
+    app: model-registry-db
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: postgres
+    name: postgres
+  selector:
+    app: model-registry-db
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: novalux-model-registry-storage
+  namespace: novalux-ai
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: standard
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: model-registry-backup
+  namespace: novalux-ai
+spec:
+  schedule: "0 2 * * *"  # Run at 2 AM every day
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: backup
+            image: novalux/model-registry-backup:v1.0.0
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: REGISTRY_URL
+              value: "http://novalux-model-registry:8080"
+            - name: BACKUP_PATH
+              value: "/backups"
+            - name: RETENTION_DAYS
+              value: "7"
+            volumeMounts:
+            - name: backup-volume
+              mountPath: /backups
+          restartPolicy: OnFailure
+          volumes:
+          - name: backup-volume
+            persistentVolumeClaim:
+              claimName: novalux-model-registry-backups
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: novalux-model-registry-backups
+  namespace: novalux-ai
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: standard
